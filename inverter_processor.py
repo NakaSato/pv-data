@@ -5,23 +5,7 @@ import os
 from dataset_acquisition import import_solar_data, analyze_solar_data
 
 def save_solar_data(df, output_path=None, format='csv'):
-    """
-    Save solar data to a file in the specified format
-    
-    Parameters:
-    -----------
-    df : pandas DataFrame
-        DataFrame to save
-    output_path : str, optional
-        Path where the file should be saved
-    format : str, optional
-        File format to save ('csv', 'excel', 'pickle', 'parquet')
-        
-    Returns:
-    --------
-    str
-        Path to the saved file
-    """
+
     # If no output path specified, create one based on current time
     if output_path is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -59,31 +43,112 @@ def save_solar_data(df, output_path=None, format='csv'):
     return output_path
 
 def standardize_solar_data(df):
-    """
-    Standardize solar data fields to ensure consistent units and field names
-    
-    Parameters:
-    -----------
-    df : pandas DataFrame
-        Raw solar data DataFrame
-        
-    Returns:
-    --------
-    df : pandas DataFrame
-        Standardized DataFrame with consistent units and field names
-    """
+
     # Create a copy to avoid modifying original
     std_df = df.copy()
+
+    # More comprehensive field mapping for different inverter data formats
+    field_mapping = {
+        # Common inverter format mappings
+        'Serial number': 'SN',
+        'Time': 'Timestamp',
+        'Pac(W)': 'AC_Power',
+        'Pdc(W)': 'DC_Power', 
+        'Ppv(W)': 'DC_Power',
+        'Fac(Hz)': 'Frequency',
+        'PF': 'Power_Factor',
+        'Efficiency(%)': 'Efficiency',
+    }
     
-    # Standardized fields with units:
-    # Timestamp (UTC/local) - Critical for sequences
-    # AC_Power (kW) - Target variable
-    # DC_Power (kW) - Useful for loss analysis
-    # Voltage_AC (V) - Optional for stability
-    # Current_AC (A) - Optional
-    # Frequency (Hz) - Optional
-    # Efficiency (%) - Useful for degradation
-    # Status_Flags - Clean outliers
+    #     # More comprehensive field mapping for different inverter data formats
+    # field_mapping = {
+    #     # Common inverter format mappings
+    #     'Serial number': 'SN',
+    #     'Time': 'Timestamp',
+    #     'Pac(W)': 'AC_Power',
+    #     'Pdc(W)': 'DC_Power', 
+    #     'Ppv(W)': 'DC_Power',
+    #     'VacR(V)': 'Voltage_AC_R',
+    #     'VacS(V)': 'Voltage_AC_S',
+    #     'VacT(V)': 'Voltage_AC_T',
+    #     'IacR(A)': 'Current_AC_R',
+    #     'IacS(A)': 'Current_AC_S',
+    #     'IacT(A)': 'Current_AC_T',
+    #     'Vdc(V)': 'Voltage_DC',
+    #     'Idc(A)': 'Current_DC',
+    #     'Fac(Hz)': 'Frequency',
+    #     'PF': 'Power_Factor',
+    #     'Efficiency(%)': 'Efficiency',
+    #     'Temperature(℃)': 'Temperature_Inverter',
+    #     'E-Total(kWh)': 'Total_Yield',
+    #     'E-Today(kWh)': 'Daily_Yield'
+    # }
+    
+    # Check for inverter format and apply mapping more intelligently
+    if any(col in df.columns for col in field_mapping.keys()):
+        print("Detected inverter data format - mapping fields to standard format")
+        mapped_df = pd.DataFrame()
+        
+        # Track which standard columns were filled
+        mapped_columns = set()
+        
+        # Apply mappings
+        for input_col in df.columns:
+            # Check if this column should be mapped
+            if input_col in field_mapping:
+                std_col = field_mapping[input_col]
+                
+                # Avoid duplicate mappings (e.g., if two source columns map to the same target)
+                if std_col in mapped_columns:
+                    print(f"Skipping {input_col} as {std_col} already mapped")
+                    continue
+                    
+                mapped_df[std_col] = df[input_col]
+                mapped_columns.add(std_col)
+                print(f"Mapped {input_col} → {std_col}")
+                
+                # Convert power columns from watts to kilowatts
+                if std_col in ['AC_Power', 'DC_Power'] and mapped_df[std_col].mean() > 100:
+                    mapped_df[std_col] = mapped_df[std_col] / 1000
+                    print(f"Converting {std_col} from watts to kilowatts")
+                    
+        # If any columns weren't mapped, preserve them with original names
+        for col in df.columns:
+            if col not in field_mapping:
+                mapped_df[col] = df[col]
+                print(f"Preserved original column: {col}")
+                
+        # Use the mapped dataframe instead
+        if not mapped_df.empty:
+            std_df = mapped_df
+    
+    # Check if there's a 'Time' column in a format like '4/4/2025 00:00'
+    if 'Time' in std_df.columns and not 'Timestamp' in std_df.columns:
+        print("Converting Time column to proper Timestamp, Date, and Time")
+        try:
+            # Try to parse the existing 'Time' column
+            std_df['Timestamp'] = pd.to_datetime(std_df['Time'], dayfirst=True)  # Assuming day/month/year format
+            std_df['Date'] = std_df['Timestamp'].dt.date
+            std_df['Time_Only'] = std_df['Timestamp'].dt.time
+            
+            # Reorder columns to place Date and Time right after Timestamp
+            cols = std_df.columns.tolist()
+            cols.remove('Timestamp')
+            cols.remove('Date')
+            cols.remove('Time_Only')
+            
+            # Put Timestamp first, followed by Date and Time
+            cols = ['Timestamp', 'Date', 'Time_Only'] + cols
+            std_df = std_df[cols]
+            
+            # Rename the original Time column to avoid confusion
+            if 'Time' in cols:
+                std_df = std_df.rename(columns={'Time': 'Time_Original'})
+                std_df = std_df.rename(columns={'Time_Only': 'Time'})
+                
+            print("Successfully separated datetime into Timestamp, Date, and Time columns")
+        except Exception as e:
+            print(f"Error converting Time column: {e}")
     
     # Convert power from watts to kilowatts if needed
     if 'AC_Power' in std_df.columns and std_df['AC_Power'].mean() > 100:  # Likely in watts
@@ -99,46 +164,15 @@ def standardize_solar_data(df):
         print("Converting Efficiency from decimal to percentage")
         std_df['Efficiency'] = std_df['Efficiency'] * 100
     
-    # Map specific inverter data format to standard fields
-    field_mapping = {
-        # Format: 'input_column': 'standard_column'
-        'Time': 'Timestamp',
-        'Pac(W)': 'AC_Power',
-        'Ppv(W)': 'DC_Power',
-        'VacR(V)': 'Voltage_AC',  # Using R phase voltage
-        'IacR(A)': 'Current_AC',  # Using R phase current
-        'Fac(Hz)': 'Frequency'
-    }
-    
-    # Check if this is the inverter format and apply mapping
-    inverter_keys = ['Serial number', 'Time', 'Pac(W)', 'Ppv(W)', 'Fac(Hz)']
-    if all(key in df.columns for key in inverter_keys):
-        print("Detected inverter data format - mapping fields to standard format")
-        # Create new dataframe with mapped columns
-        mapped_df = pd.DataFrame()
-        
-        for input_col, std_col in field_mapping.items():
-            if input_col in df.columns:
-                mapped_df[std_col] = df[input_col]
-                print(f"Mapped {input_col} → {std_col}")
-                
-                # Convert power columns from watts to kilowatts
-                if std_col in ['AC_Power', 'DC_Power'] and mapped_df[std_col].mean() > 100:
-                    mapped_df[std_col] = mapped_df[std_col] / 1000
-                    print(f"Converting {std_col} from watts to kilowatts")
-        
-        # Convert timestamp to datetime if it's not already
-        if 'Timestamp' in mapped_df.columns and not pd.api.types.is_datetime64_any_dtype(mapped_df['Timestamp']):
-            mapped_df['Timestamp'] = pd.to_datetime(mapped_df['Timestamp'])
-            print("Converted Timestamp to datetime format")
-            
-        # Use the mapped dataframe instead
-        std_df = mapped_df
+    # Convert timestamp to datetime if it's not already
+    if 'Timestamp' in std_df.columns and not pd.api.types.is_datetime64_any_dtype(std_df['Timestamp']):
+        std_df['Timestamp'] = pd.to_datetime(std_df['Timestamp'])
+        print("Converted Timestamp to datetime format")
     
     # Add any missing required columns
     required_columns = [
         'Timestamp', 'AC_Power', 'DC_Power', 'Voltage_AC', 
-        'Current_AC', 'Frequency', 'Efficiency', 'Status_Flags'
+        'Current_AC', 'Frequency', 'Efficiency'
     ]
     
     # Add timestamp timezone info if not present
@@ -150,24 +184,30 @@ def standardize_solar_data(df):
         except Exception as e:
             print(f"Could not localize timezone: {e}")
     
-    # Separate Timestamp into Date and Time columns
+    # Separate Timestamp into Date and Time columns using concat to avoid fragmentation
     if 'Timestamp' in std_df.columns and pd.api.types.is_datetime64_any_dtype(std_df['Timestamp']):
         print("Separating Timestamp into Date and Time columns")
-        std_df['Date'] = std_df['Timestamp'].dt.date
-        std_df['Time'] = std_df['Timestamp'].dt.time
         
-        # Reorder columns to place Date and Time right after Timestamp
-        cols = list(std_df.columns)
-        # Remove Date and Time from their current positions
-        cols.remove('Date')
-        cols.remove('Time')
-        # Find the position of Timestamp
-        timestamp_idx = cols.index('Timestamp')
-        # Insert Date and Time after Timestamp
-        cols.insert(timestamp_idx + 1, 'Date')
-        cols.insert(timestamp_idx + 2, 'Time')
-        # Reorder the DataFrame
-        std_df = std_df[cols]
+        # Create a new DataFrame with Date and Time columns
+        new_cols = pd.DataFrame({
+            'Date': std_df['Timestamp'].dt.date,
+            'Time': std_df['Timestamp'].dt.time
+        }, index=std_df.index)
+        
+        # Get column positions correctly
+        timestamp_idx = list(std_df.columns).index('Timestamp')
+        cols_before = list(std_df.columns)[:timestamp_idx+1]
+        cols_after = list(std_df.columns)[timestamp_idx+1:]
+        
+        # Use concat to add the columns in the proper position
+        std_df = pd.concat(
+            [
+                std_df[cols_before],
+                new_cols,
+                std_df[cols_after]
+            ],
+            axis=1
+        )
         
         print("Created Date and Time columns as second and third columns")
     
@@ -181,18 +221,18 @@ def standardize_solar_data(df):
         'Voltage_AC': 'Grid voltage (V)',
         'Current_AC': 'Grid current (A)',
         'Frequency': 'Grid frequency (Hz)',
-        'Efficiency': 'Inverter efficiency (%)',
-        'Status_Flags': 'Error/status codes'
+        'Efficiency': 'Inverter efficiency (%)'
     }
     
     # Update required columns to include Date and Time
     required_columns.extend(['Date', 'Time'])
     
-    # Add any missing columns as NaN
-    for col in required_columns:
-        if col not in std_df.columns:
-            std_df[col] = np.nan
-            print(f"Added missing column: {col}")
+    # Add any missing columns as NaN all at once to avoid fragmentation
+    missing_cols = [col for col in required_columns if col not in std_df.columns]
+    if missing_cols:
+        print(f"Adding missing columns: {', '.join(missing_cols)}")
+        missing_df = pd.DataFrame({col: [np.nan] * len(std_df) for col in missing_cols}, index=std_df.index)
+        std_df = pd.concat([std_df, missing_df], axis=1)
     
     print("Standardization complete")
     return std_df
